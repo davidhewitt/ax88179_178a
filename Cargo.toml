@@ -1,0 +1,11 @@
+[package]
+name = "ax88179_178a"
+version = "0.1.0"
+authors = ["David Hewitt <1939362+davidhewitt@users.noreply.github.com>"]
+edition = "2018"
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+linux-kernel-module = { path = "./linux-kernel-module-rust" }

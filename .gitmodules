@@ -1,0 +1,3 @@
+[submodule "linux-kernel-module-rust"]
+	path = linux-kernel-module-rust
+	url = git@github.com:fishinabarrel/linux-kernel-module-rust.git
