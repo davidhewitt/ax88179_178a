@@ -1,2 +1,8 @@
 /target
 *.cmd
+*.ko
+*.mod*
+*.o
+*.a
+Module.symvers
+modules.order
