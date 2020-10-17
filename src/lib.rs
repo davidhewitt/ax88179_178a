@@ -39,7 +39,7 @@ use linux_kernel_module::bindings::{
     USB_DIR_IN,
 };
 use linux_kernel_module::c_types::{c_int, c_uchar, c_void};
-use linux_kernel_module::println;
+use linux_kernel_module::{println, Error, KernelResult};
 
 use nudge::unlikely;
 
@@ -476,7 +476,7 @@ struct ax88179_data {
 // MODULE_PARM_DESC(bGETH, "Green ethernet configuration");
 
 /* ASIX AX88179/178A based USB 3.0/2.0 Gigabit Ethernet Devices */
-unsafe fn __ax88179_read_cmd(dev: *mut usbnet, cmd: u8, value: u16, index: u16, size: u16, data: *mut c_void, in_pm: c_int) -> c_int
+unsafe fn __ax88179_read_cmd(dev: *mut usbnet, cmd: u8, value: u16, index: u16, size: u16, data: *mut c_void, in_pm: c_int) -> KernelResult<()>
 {
     assert!(!dev.is_null());
 
@@ -493,7 +493,7 @@ unsafe fn __ax88179_read_cmd(dev: *mut usbnet, cmd: u8, value: u16, index: u16, 
         println!("WARNING: ax88179 - failed to read reg index {index:#x}: {ret}");
     }
 
-	return ret;
+	KernelResult::from_kernel_errno(ret)
 }
 
 unsafe fn __ax88179_write_cmd(
@@ -504,7 +504,7 @@ unsafe fn __ax88179_write_cmd(
     size: u16,
     data: *mut c_void,
     in_pm: c_int,
-) -> c_int {
+) -> KernelResult<()> {
     assert!(!dev.is_null());
 
     let f = if in_pm == 0 {
@@ -528,7 +528,7 @@ unsafe fn __ax88179_write_cmd(
         println!("WARNING: ax88179 - failed to write reg index {index:#x}: {ret}");
     }
 
-    return ret;
+    KernelResult::from_kernel_errno(ret)
 }
 
 // static int ax88179_read_cmd_nopm(struct usbnet *dev, u8 cmd, u16 value,
@@ -572,23 +572,23 @@ unsafe fn __ax88179_write_cmd(
 // 	return ret;
 // }
 
-unsafe fn ax88179_read_cmd(dev: *mut usbnet, cmd: u8, value: u16, index: u16, size: u16, data: *mut c_void, eflag: c_int) -> c_int
+unsafe fn ax88179_read_cmd(dev: *mut usbnet, cmd: u8, value: u16, index: u16, size: u16, data: *mut c_void, eflag: c_int) -> KernelResult<()>
 {
-	let ret;
+	let result;
 
 	if (eflag != 0) && (2 == size) {
 		let mut buf = [0u8; 2];
-		ret = __ax88179_read_cmd(dev, cmd, value, index, size, &mut buf as *mut _ as _, 0);
+		result = __ax88179_read_cmd(dev, cmd, value, index, size, &mut buf as *mut _ as _, 0);
 		*(data as *mut u16) = u16::from_le_bytes(buf);
 	} else if (eflag != 0) && (4 == size) {
 		let mut buf = [0u8; 4];
-		ret = __ax88179_read_cmd(dev, cmd, value, index, size, &mut buf as *mut _ as _, 0);
+		result = __ax88179_read_cmd(dev, cmd, value, index, size, &mut buf as *mut _ as _, 0);
 		*(data as *mut u32) = u32::from_le_bytes(buf);
 	} else {
-		ret = __ax88179_read_cmd(dev, cmd, value, index, size, data, 0);
+		result = __ax88179_read_cmd(dev, cmd, value, index, size, data, 0);
 	}
 
-	return ret;
+	result
 }
 
 trait WriteData {
@@ -638,7 +638,7 @@ unsafe fn ax88179_write_cmd(
     value: u16,
     index: u16,
     data: impl WriteData,
-) -> c_int {
+) -> KernelResult<()> {
     let mut data = data.value();
     let size = data.as_mut().len() as u16;
     __ax88179_write_cmd(dev, cmd, value, index, size, data.as_mut().as_ptr() as _, 0)
@@ -1799,44 +1799,33 @@ unsafe extern "C" fn ax88179_resume(intf: *mut usb_interface) -> c_int {
 // 	return 0;
 // }
 
-unsafe fn access_eeprom_mac(dev: *mut usbnet, buf: *mut u8, offset: u8, wflag: c_int) -> c_int {
-    let mut ret: c_int = 0;
+unsafe fn access_eeprom_mac(dev: *mut usbnet, buf: *mut u8, offset: u8, wflag: c_int) -> KernelResult<()> {
     let tmp: *mut u16 = buf as *mut u16;
 
     for i in 0..(ETH_ALEN as u8 >> 1) {
         if wflag > 0 {
-            ret = ax88179_write_cmd(dev, AX_ACCESS_EEPROM, (offset + i) as u16, 1, *tmp.offset(i as isize));
-            if ret < 0 {
-                break;
-            }
+            ax88179_write_cmd(dev, AX_ACCESS_EEPROM, (offset + i) as u16, 1, *tmp.offset(i as isize))?;
             // FIXME: mdelay is a macro so using msleep for now
             // mdelay(15);
             msleep(15);
         } else {
-            ret = ax88179_read_cmd(dev, AX_ACCESS_EEPROM, (offset + i) as u16, 1, 2, tmp.offset(i as isize) as _, 0);
-            if ret < 0 {
-                break;
+            let result = ax88179_read_cmd(dev, AX_ACCESS_EEPROM, (offset + i) as u16, 1, 2, tmp.offset(i as isize) as _, 0);
+            if let Err(e) = result {
+                println!("DEBUG: ax88179 - failed to read MAC address from EEPROM: {}", e.into_kernel_errno());
+                return result;
             }
         }
     }
 
     if wflag == 0 {
-        if ret < 0 {
-            // netdev_dbg(dev->net, "Failed to read MAC address from EEPROM: %d\n", ret);
-            println!("DEBUG: ax88179 - failed to read MAC address from EEPROM: {ret}");
-            return ret;
-        }
         core::slice::from_raw_parts_mut((*(*dev).net).dev_addr, ETH_ALEN as usize)
             .copy_from_slice(core::slice::from_raw_parts_mut(buf, ETH_ALEN as usize))
     } else {
         /* reload eeprom data */
-        ret = ax88179_write_cmd(dev, AX_RELOAD_EEPROM_EFUSE, 0, 0, ());
-        if ret < 0 {
-            return ret;
-        }
+        ax88179_write_cmd(dev, AX_RELOAD_EEPROM_EFUSE, 0, 0, ())?;
     }
 
-    return 0;
+    Ok(())
 }
 
 unsafe fn ax88179_check_ether_addr(dev: *mut usbnet) -> c_int
@@ -1874,13 +1863,8 @@ unsafe fn ax88179_check_ether_addr(dev: *mut usbnet) -> c_int
 	return 0;
 }
 
-unsafe fn ax88179_get_mac(dev: *mut usbnet, buf: *mut u8) -> c_int {
-    let mut ret: c_int;
-
-    ret = access_eeprom_mac(dev, buf, 0x0, 0);
-    if ret < 0 {
-        return ret;
-    }
+unsafe fn ax88179_get_mac(dev: *mut usbnet, buf: *mut u8) -> KernelResult<()> {
+    access_eeprom_mac(dev, buf, 0x0, 0)?;
 
     // TODO: enable
     // if ax88179_check_ether_addr(dev) != 0 {
@@ -1912,7 +1896,7 @@ unsafe fn ax88179_get_mac(dev: *mut usbnet, buf: *mut u8) -> c_int {
     (*(*dev).net).perm_addr[..ETH_ALEN as usize]
         .copy_from_slice(core::slice::from_raw_parts_mut((*(*dev).net).dev_addr as *mut u8, ETH_ALEN as usize));
 
-    ret = ax88179_write_cmd(
+    let result = ax88179_write_cmd(
         dev,
         AX_ACCESS_MAC,
         AX_NODE_ID,
@@ -1920,16 +1904,15 @@ unsafe fn ax88179_get_mac(dev: *mut usbnet, buf: *mut u8) -> c_int {
         core::slice::from_raw_parts_mut((*(*dev).net).dev_addr as *mut u8, ETH_ALEN as usize),
     );
 
-    if ret < 0 {
+    if let Err(e) = result {
         // netdev_err(dev->net, "Failed to write MAC address: %d", ret);
-        println!("ERROR: ax88179 - failed to write MAC address: {ret}");
-        return ret;
+        println!("ERROR: ax88179 - failed to write MAC address: {}", e.to_kernel_errno());
     }
 
-    return 0;
+    result
 }
 
-unsafe extern "C" fn ax88179_bind(dev: *mut usbnet, intf: *mut usb_interface) -> c_int {
+unsafe fn try_ax88179_bind(dev: *mut usbnet, intf: *mut usb_interface) -> KernelResult<()> {
     println!("ax88179_bind");
 
     let data: *mut ax88179_data = transmute((&mut *dev).data.as_ptr());
@@ -1948,21 +1931,21 @@ unsafe extern "C" fn ax88179_bind(dev: *mut usbnet, intf: *mut usb_interface) ->
     data.write(zeroed());
 
     tmp32 = 0;
-    ax88179_write_cmd(dev, 0x81, 0x310, 0, tmp32);
+    ax88179_write_cmd(dev, 0x81, 0x310, 0, tmp32)?;
 
     /* Power up ethernet PHY */
     tmp16 = 0;
-    ax88179_write_cmd(dev, AX_ACCESS_MAC, AX_PHYPWR_RSTCTL, 2, tmp16);
+    ax88179_write_cmd(dev, AX_ACCESS_MAC, AX_PHYPWR_RSTCTL, 2, tmp16)?;
     tmp16 = AX_PHYPWR_RSTCTL_IPRL;
-    ax88179_write_cmd(dev, AX_ACCESS_MAC, AX_PHYPWR_RSTCTL, 2, tmp16);
+    ax88179_write_cmd(dev, AX_ACCESS_MAC, AX_PHYPWR_RSTCTL, 2, tmp16)?;
     msleep(200);
 
     tmp = AX_CLK_SELECT_ACS | AX_CLK_SELECT_BCS;
-    ax88179_write_cmd(dev, AX_ACCESS_MAC, AX_CLK_SELECT, 1, tmp);
+    ax88179_write_cmd(dev, AX_ACCESS_MAC, AX_CLK_SELECT, 1, tmp)?;
     msleep(100);
 
     /* Get the MAC address */
-    ret = ax88179_get_mac(dev, mac.as_mut_ptr());
+    ax88179_get_mac(dev, mac.as_mut_ptr())?;
 
     println!("Got mac value of {mac:?}");
     // 	if (ret)
@@ -2099,8 +2082,11 @@ unsafe extern "C" fn ax88179_bind(dev: *mut usbnet, intf: *mut usb_interface) ->
     // #endif
     // 	return 0;
 
-    // out:
-    return ret;
+    Ok(())
+}
+
+unsafe extern "C" fn ax88179_bind(dev: *mut usbnet, intf: *mut usb_interface) -> c_int {
+    try_ax88179_bind(dev, intf).into_kernel_errno()
 }
 
 unsafe extern "C" fn ax88179_unbind(dev: *mut usbnet, intf: *mut usb_interface) {
@@ -2598,6 +2584,27 @@ unsafe extern "C" fn ax88179_stop(dev: *mut usbnet) -> c_int {
 
     // 	kfree(tmp16);
     return 0;
+}
+
+trait KernelResultExt {
+    fn from_kernel_errno(errno: c_int) -> Self;
+    fn into_kernel_errno(self) -> c_int;
+}
+
+impl KernelResultExt for KernelResult<()> {
+    fn from_kernel_errno(errno: c_int) -> Self {
+        match errno {
+            0 => Ok(()),
+            _ => Err(Error::from_kernel_errno(errno))
+        }
+    }
+
+    fn into_kernel_errno(self) -> c_int {
+        match self {
+            Ok(()) => 0,
+            Err(e) => e.into_kernel_errno(),
+        }
+    }
 }
 
 #[allow(non_upper_case_globals)]
